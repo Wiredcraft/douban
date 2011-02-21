@@ -1,0 +1,56 @@
+<?php
+/**
+ * Implementation of hook_schema().
+ */
+function douban_schema() {
+  $schema = array();
+  $schema['douban'] = array(
+    'description' => 'douban',
+    'fields' => array(
+      'uid' => array(
+        'type' => 'int',
+        'description' => 'user id',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'size' => 'big',
+      ),
+      'douban_uid' => array(
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'douban uid',
+      ),
+      'douban_name' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'description' => 'douban account',
+      ),
+      'token' => array(
+        'type' => 'text',
+        'description' => 'token information',
+        'not null' => true,
+        'serialize' => true,
+        'size' => 'medium'
+      ),
+    ),
+    'indexes' => array('douban_name' => array('douban_name')),
+    'primary key' => array('uid'),
+  );
+  return $schema;
+}
+
+/**
+ * Implementation of hook_install().
+ */
+function douban_install() {
+  drupal_install_schema('douban');
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function douban_uninstall() {
+  drupal_uninstall_schema('douban');
+}
+

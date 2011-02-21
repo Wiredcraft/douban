@@ -1,0 +1,420 @@
+<?php
+/**
+ * Implementation of hook_menu().
+ */
+
+function douban_menu() {
+  $items = array();
+  $items['douban/login'] = array(
+    'page callback' => 'douban_login',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+    'file' => 'douban.pages.inc',
+  );
+  $items['admin/settings/douban'] = array(
+    'title' => t('Douban settings'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('douban_admin_settings'),
+    'access arguments' => array('administration douban settings'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'douban.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_perm()
+ */
+function douban_perm() {
+  return array('administration douban settings');
+}
+
+/**
+ * Check Douban settings has been configured or not.
+ */
+function douban_configured() {
+  $key = variable_get('douban_consumer_key', NULL);
+  $secret = variable_get('douban_consumer_secret', NULL);
+  if ( empty($key) || empty($secret) ) {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function douban_form_alter(&$form, $form_state, $form_id) {
+  if (!douban_configured()) {
+    return;
+  }
+
+  if ($_SESSION['douban_oauth']['signin']) {
+    $form['#submit'] = array_merge(array('douban_oauth_callback_submit'), $form['#submit']);
+  }
+
+  variable_set('douban_button', 'douban_button.gif');
+  $module_path = drupal_get_path('module', 'douban') .'/images/';
+  if ('user_login_block' == $form_id || 'user_login' == $form_id) {
+      $logo = variable_get('douban_button', $default = NULL);
+      $items[] = array('data' => l(
+        theme_image($module_path . $logo),
+        'douban/login', array('html' => TRUE)
+      ));
+      $form['douban_button']['#value'] = theme('item_list', $items);
+  }
+  elseif ( $form_id == 'user_register' && isset($_SESSION['douban']['values']) ) {
+    $form['name']['#default_value'] = $_SESSION['douban']['values']['screen_name'];
+    $form['auth_douban'] = array('#type' => 'hidden', '#value' => $_SESSION['douban']['values']['user_id']);
+  }
+}
+
+/**
+ * Display Douban banner
+ */
+function douban_banner() {
+    $site_url = url($path = NULL, $options = array('absolute' => TRUE));
+    $module_path = drupal_get_path('module', 'douban');
+    $image_path = $module_path . '/images/';
+    $logo = variable_get('douban_button', 'douban_button.gif');
+//  TODO: A popup widonw
+//    $attributes = array(
+//    'onclick' => "var w=window.open('".$site_url."douban', 'douban', 'width=800,height=800,left=150,top=100,scrollbar=no,resize=no'); return false;",
+//    'style' => "cursor: pointer;",
+//    'original' => $image_path . $logo
+//    );
+    $douban_banner = l(
+    theme_image($image_path . $logo, $alt = '', $title = '', $attributes, $getsize = TRUE),
+    $site_url . 'douban/login',
+    array('html' => TRUE));
+    return $douban_banner;
+  }
+
+/**
+ * Get access token.
+ */
+function douban_access_token($values = array()) {
+  if (!isset($values['http_url'])) {
+    $values['http_url'] = 'http://www.douban.com/service/auth/access_token';
+  }
+
+  if (!isset($values['oauth_token']) && isset($_GET['oauth_token'])) {
+    $values['oauth_token'] = $_GET['oauth_token'];
+  }
+
+  if (!isset($values['oauth_access_token_key']) && isset($_SESSION['douban_oauth_token'])) {
+    $values['oauth_access_token_key'] = $_SESSION['douban_oauth_token']->key;
+    $values['oauth_access_token_secret'] = $_SESSION['douban_oauth_token']->secret;
+  }
+
+  $result = douban_set_request($values['http_url'], $values);
+
+  if ($result) {
+    $token = douban_parse_parameters_user($result);
+    if ($token['oauth_token_secret']) {
+      unset($_SESSION['douban_oauth_token']);
+
+      $tok = new stdClass;
+      $tok->key = $token['oauth_token'][0];
+      $tok->secret = $token['oauth_token_secret'][0];
+      $tok->douban_user_id = $token['douban_user_id'][0];
+      return $tok;
+    }
+  }
+}
+
+/**
+ * Do a http request
+ */
+function douban_set_request($http_url, array $values = array(), array $headers = array(), $method = 'POST') {
+  if (!isset($headers['User-Agent'])) {
+    $headers['User-Agent'] = 'Sae T OAuth v0.2.0-beta2';
+  }
+
+  if (!isset($headers['Content-Type'])) {
+    $headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
+  }
+
+  $values['http_url'] = $http_url;
+  $values['http_method'] = $method;
+
+  if (!$request = douban_get_request($values)) {
+    return FALSE;
+  }
+  return douban_http($request->http_url, $headers, $request->to_data);
+}
+
+
+/**
+ * Make an HTTP request
+ */
+function douban_http($url, $headers = NULL, $to_data) {
+  $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+    if (isset($headers)) {
+      curl_setopt($ch, CURLOPT_POST, TRUE);
+      curl_setopt($ch, CURLOPT_HEADER, TRUE);
+      curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+      curl_setopt($ch, CURLOPT_POSTFIELDS, $to_data);
+    }
+    $response = curl_exec($ch);
+    curl_close($ch);
+    return $response;
+}
+
+/**
+ * GET query from string to array
+ */
+function douban_parse_parameters($string) {
+  $string = strstr($string, 'oauth_token_secret');
+  if (!isset($string) || !$string)
+    return array();
+  $pairs = explode('&', $string);
+  $param = array();
+
+  foreach ($pairs as $pair) {
+    $split = explode('=', $pair, 2);
+    $parameter = urldecode($split[0]);
+    $value = isset($split[1]) ? urldecode($split[1]) : '';
+
+    if (isset($param[$parameter])) {
+      if (is_scalar($param[$parameter])) {
+        $param[$parameter] = array($param[$parameter]);
+      }
+      $param[$parameter][] = $value;
+    }
+    else {
+      $param[$parameter] = $value;
+    }
+  }
+  return $param;
+}
+
+/**
+ * GET query with douban_user_id from string to array
+ */
+function douban_parse_parameters_user($string) {
+  $string = strstr($string, 'oauth_token_secret');
+  if (!isset($string) || !$string)
+    return array();
+  $pairs = explode('&', $string);
+  $param = array();
+
+  foreach ($pairs as $pair) {
+    $split = explode('=', $pair, 3);
+    $parameter = urldecode($split[0]);
+    $value = isset($split[1]) ? urldecode($split[1]) : '';
+    $param[$parameter][] = $value;
+  }
+  return $param;
+}
+
+/**
+ * Create http request
+ */
+function douban_get_request(array $params) {
+  $request = new stdClass;
+  $consumer_key = variable_get('douban_consumer_key', NULL);
+  $consumer_secret = variable_get('douban_consumer_secret', NULL);
+
+  $defaults = array(
+    'oauth_version' => '1.0', // Version
+    'oauth_nonce' => md5(mt_rand(). $_SERVER['REQUEST_TIME']), // Random number
+    'oauth_timestamp' => time(), // Time stamp
+    'oauth_consumer_key' => $consumer_key, // App key
+    'oauth_consumer_secret' => $consumer_secret, // App secret key
+    'oauth_signature_method' => 'HMAC-SHA1', // Signature method
+  );
+
+  $params = array_merge($defaults, $params);
+
+  if (isset($params['oauth_consumer_key'])) {
+    $request->consumer->key = $params['oauth_consumer_key'];
+  } else {
+    drupal_set_message('please provid a douban app key', 'error');
+    return false;
+  }
+
+  if (isset($params['oauth_consumer_secret']) && $params['oauth_consumer_secret']) {
+    $request->consumer->secret = $params['oauth_consumer_secret'];
+    unset($params['oauth_consumer_secret']);
+  } else {
+    $request->consumer->secret = NULL;
+  }
+
+  // Access token
+  $request->token = NULL;
+  if (isset($params['oauth_access_token_key'])) {
+    $request->token->key = $params['oauth_access_token_key'];
+    unset($params['oauth_access_token_key']);
+  }
+
+  if (isset($params['oauth_access_token_secret'])) {
+    $request->token->secret = $params['oauth_access_token_secret'];
+    unset($params['oauth_access_token_secret']);
+  }
+
+  if (!$request->token && $GLOBALS['user']->uid > 0) {
+    $request->token = douban_consumer_secret($GLOBALS['user']->uid);
+  }
+
+  if ($request->token->key && !isset($params['oauth_token'])) {
+    $params['oauth_token'] = $request->token->key;
+  }
+
+  if (isset($params['http_method'])) {
+    $request->http_method = $params['http_method'];
+    unset($params['http_method']);
+  } else {
+    $request->http_method = 'POST';
+  }
+
+  if (isset($params['http_url'])) {
+    $request->http_url = $params['http_url'];
+    unset($params['http_url']);
+  } else {
+    return false;
+  }
+
+  $keys = douban_urlencode_rfc3986(array_keys($params));
+  $values = douban_urlencode_rfc3986(array_values($params));
+  $params = array_combine($keys, $values);
+  uksort($params, 'strcmp');
+  $pairs = $urls = array();
+
+  foreach ($params as $key => $value ) {
+    if (is_array($value)) {
+      natsort($value);
+      foreach ($value as $v2) {
+        $pairs[] = $key . '=' . $v2;
+        $urls[] = $key . '[]=' . $v2;
+      }
+    } else {
+      $pairs[] = $key . '=' . $value;
+      $urls[] = $key . '=' . $value;
+    }
+  }
+
+  $parts = array($request->http_method, $request->http_url, implode('&', $pairs));
+  $request->base_string = implode('&', douban_urlencode_rfc3986($parts));
+
+  if ($request->consumer->secret) {
+    $key_parts = array(
+      $request->consumer->secret,
+      $request->token ? $request->token->secret : ""
+    );
+    $key_parts = douban_urlencode_rfc3986($key_parts);
+    $key = implode('&', $key_parts);
+    $request->sign = base64_encode(hash_hmac('sha1', $request->base_string, $key, true));
+  }
+
+  if (!$request->sign) {
+    drupal_set_message('Can not get signature', 'error');
+    return false;
+  }
+
+  $urls[] = 'oauth_signature='. douban_urlencode_rfc3986($request->sign);
+  $request->to_data = implode('&', $urls);
+  return $request;
+}
+
+/**
+ * Encode data
+ */
+function douban_urlencode_rfc3986($input) {
+  if (is_array($input)) {
+      return array_map('douban_urlencode_rfc3986', $input);
+  } else if (is_scalar($input)) {
+    return str_replace( '+', ' ',  str_replace('%7E', '~', rawurlencode($input)));
+  } else {
+    return '';
+  }
+}
+
+/**
+ * Get user access token
+ */
+function douban_get_access_token($uid = 0) {
+  static $datas;
+  if (!isset($datas) || !isset($datas[$uid])) {
+    if ($uid > 0) {
+      if ($o = db_fetch_object(db_query('SELECT uid, token FROM {douban} WHERE uid = %d', $uid))) {
+        if ($o->token) {
+          $datas[$uid] = unserialize($o->token);
+        } else {
+          drupal_set_message(t('Your authorization has expired') .l(t('Click here'), 'douban/login'). t('re-authorize'));
+        }
+      }
+    } else {
+      $datas[$uid] = false;
+    }
+  }
+  return $datas[$uid];
+}
+
+/**
+ * Get authorize token, direct user to douban.com
+ */
+function douban_login_url(array $values = array()) {
+  if (!isset($values['http_url'])) {
+    // Request token url
+    $values['http_url'] = 'http://www.douban.com/service/auth/request_token';
+  }
+
+  if (isset($_GET['oauth_callback'])) {
+    $oauth_callback = $_GET['oauth_callback'];
+  } else if (isset($values['oauth_callback'])) {
+    $oauth_callback = $values['oauth_callback'];
+    unset($values['oauth_callback']);
+  } else {
+    if ($redirect = douban_get_redirect()) {
+      $redirect = '&' . $redirect;
+    } else {
+      $redirect = '';
+    }
+    $oauth_callback = url('douban/login', array('query' => 'op=validate'. $redirect, 'absolute' => true));
+  }
+  if (!$request = douban_get_request($values)) {
+    return false;
+  }
+
+  $headers = array(
+    'Authorization: OAuth realm' => 'http://sp.example.com/',
+    'Content-Type' => 'application/x-www-form-urlencoded; charset=utf-8'
+  );
+  $result = douban_http($request->http_url, $headers, $request->to_data);
+
+  if ($result && strpos($result, 'oauth_token_secret') !== false) {
+    $token = douban_parse_parameters($result);
+
+    if ($token['oauth_token_secret']) {
+      $tok = new stdClass;
+      $tok->key = $token['oauth_token'];
+      $tok->secret = $token['oauth_token_secret'];
+
+      $_SESSION['douban_oauth_token'] = $tok;
+      $url = 'http://www.douban.com/service/auth/authorize';
+      $url .= '?oauth_token='.$token['oauth_token'];
+      $url .= '&oauth_callback='.urlencode($oauth_callback);
+      return $url;
+    }
+  }
+  // Fail to get authenticate token
+  return false;
+}
+
+/**
+ * unset destination
+ */
+function douban_get_redirect() {
+  if (isset($_REQUEST['destination'])) {
+    if (!isset($_REQUEST['redirect'])) {
+      $_REQUEST['redirect'] = $_REQUEST['destination'];
+    }
+    unset($_REQUEST['destination']);
+  }
+  if (isset($_REQUEST['redirect'])) {
+    return 'redirect=' . $_REQUEST['redirect'];
+  }
+}
