@@ -1,6 +1,21 @@
-Created on 20110217
+douban module is an Drupal integration to douban.com's API
 
-1, Display a login button on login form(TODO: pop window for login)
-2, User is able to login by douban account
-3, Generate a temporary password for user at first time
-4, Redirect to user on edit page with message (An account has been created, temporary password: @pass<br /> Remember this password if you want to use it in the future, or change it in the following )
+# Workflow
+
+1. A login button will show on login form 
+2. User will be redirected to douban.com and is able to login by douban account
+3. Generate a temporary password for user on Drupal site
+4. Redirect to user on user edit page with welcome message
+
+# Install
+
+1. Download the archive or clone the repository.
+2. Copy the douban/ folder in your modules folders (for example: sites/all/modules)
+3. Go to the modules pages (/admin/build/modules), and enable the douban module.
+4. Apply your douban API key on http://www.douban.com/service/apikey/apply
+5. Fill in your API Key and SECRET Key on douban settings page (/admin/settings/douban)
+7. From now on, anonymous user is able to see douban button on login form
+
+# Maintainer
+
+- Howell, from Wiredcraft(http://wiredcraft.com)
