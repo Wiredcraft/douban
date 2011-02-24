@@ -19,6 +19,31 @@ function douban_menu() {
     'type' => MENU_NORMAL_ITEM,
     'file' => 'douban.admin.inc',
   );
+  $items['user/%user/douban/config'] = array(
+    'title' => t('Douban'),
+    'page callback' => 'douban_user_config',
+    'page arguments' => array(1),
+    'access callback' => 'user_edit_access',
+    'access arguments' => array(1),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'douban.pages.inc',
+  );
+  $items['user/%user/douban/unbind'] = array(
+    'title' => t('Unbind douban account'),
+    'page callback' => 'douban_user_config',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('douban_unbind_confirm', 1),
+    'access callback' => 'user_edit_access',
+    'access arguments' => array(1),
+    'type' => MENU_CALLBACK,
+    'file' => 'douban.pages.inc',
+  );
+  $items['admin/settings/douban/users'] = array(
+    'title' => 'Douban User List',
+    'page callback' => 'douban_admin_users',
+    'access arguments' => array('administer douban'),
+    'file' => 'douban.admin.inc',
+  );
   return $items;
 }
 
@@ -67,6 +92,55 @@ function douban_form_alter(&$form, $form_state, $form_id) {
     $form['name']['#default_value'] = $_SESSION['douban']['values']['screen_name'];
     $form['auth_douban'] = array('#type' => 'hidden', '#value' => $_SESSION['douban']['values']['user_id']);
   }
+
+  global $user;
+  $douban = false;
+  if ('comment_form' == $form_id) {
+    if (variable_get('douban_comment', 1)) {
+      if ($user->uid > 0) {
+        $douban = true;
+      } else {
+        if (variable_get('comment_form_location_'. $node->type, COMMENT_FORM_SEPARATE_PAGE) == COMMENT_FORM_SEPARATE_PAGE) {
+          $destination = 'redirect='. rawurlencode('comment/reply/'.$form['nid']['#value']);
+        } else {
+          $destination = 'redirect='. rawurlencode('node/'.$form['nid']['#value']);
+        }
+        $form['douban_links'] = array(
+          '#value' => theme('item_list', array(array(
+            'data' => l('Login by Douban account', 'douban/login', array('query' => $destination)),
+            'class' => 'douban_login_links'
+          ))),
+          '#weight' => -2,
+        );
+      }
+    }
+  }else if (isset($form['#node']) && $form['#node']->type .'_node_form' == $form_id
+  && variable_get('douban_node_'.$form['#node']->type, 1) && !$form['#node']->nid) {
+    $douban = true;
+  }
+
+  if ($douban) {
+    $form['douban'] = array(
+      '#type' => 'fieldset',
+      '#title' => 'Send to miniblog',
+      '#collapsible' => true,
+      '#collapsed' => true,
+      '#tree' => true
+    );
+    $form['douban']['check'] = array(
+      '#type' => 'radios',
+      '#title' => 'Send',
+      '#required' => true,
+      '#default_value' => 1,
+      '#options' => array('No', 'Yes'),
+    );
+    $form['douban']['title'] = array(
+      '#type' => 'textfield',
+      '#title' => 'Message',
+      '#description' => 'less 140 words',
+    );
+  }
+return $form;
 }
 
 /**
@@ -256,7 +330,7 @@ function douban_get_request(array $params) {
   }
 
   if (!$request->token && $GLOBALS['user']->uid > 0) {
-    $request->token = douban_consumer_secret($GLOBALS['user']->uid);
+    $request->token = douban_get_access_token($GLOBALS['user']->uid);
   }
 
   if ($request->token->key && !isset($params['oauth_token'])) {
@@ -354,9 +428,29 @@ function douban_get_access_token($uid = 0) {
 }
 
 /**
+ * Get info from douban
+ */
+function douban_get_info($douban_name) {
+  $data = db_fetch_object(db_query('SELECT uid, token FROM {douban} WHERE uid = %d', $douban_user->uid));
+  if (isset($data->uid)) {
+    if ($result = douban_set_request('http://api.douban.com/access_token/' . $data->token)) {
+      if ($result->code == 200) {
+        $data = json_decode($result->data);
+      } else {
+        drupal_set_message(t('Authorization has expired, please get new one'), 'error');
+      }
+    }
+  } else {
+    drupal_set_message(t('Account has not been binded'), 'error');
+  }
+  return $data;
+}
+
+/**
  * Get authorize token, direct user to douban.com
  */
 function douban_login_url(array $values = array()) {
+  global $user;
   if (!isset($values['http_url'])) {
     // Request token url
     $values['http_url'] = 'http://www.douban.com/service/auth/request_token';
@@ -373,8 +467,10 @@ function douban_login_url(array $values = array()) {
     } else {
       $redirect = '';
     }
-    $oauth_callback = url('douban/login', array('query' => 'op=validate'. $redirect, 'absolute' => true));
+
+      $oauth_callback = url('douban/login', array('query' => 'op=validate'. $redirect, 'absolute' => true));
   }
+
   if (!$request = douban_get_request($values)) {
     return false;
   }
@@ -416,5 +512,81 @@ function douban_get_redirect() {
   }
   if (isset($_REQUEST['redirect'])) {
     return 'redirect=' . $_REQUEST['redirect'];
+  }
+}
+
+/**
+ * @Implement of hook_comment()
+ */
+function douban_comment(&$comment, $op) {
+  if ($op == 'insert') {
+      douban_send_miniblog (
+        $comment['douban']['title'] ? $comment['douban']['title'] : $comment['subject'],
+        url('node/'.$comment['nid'], array('absolute' => true, 'fragment' => 'comment-'. $comment['cid']))
+      );
+  }
+}
+
+/**
+ * Send message to douban's miniblog
+ * @param (string) $text: Message content
+ * @param (string) $url: Access URL
+ */
+function douban_send_miniblog($text, $url = NULL) {
+  if (isset($url)) {
+    $len = drupal_strlen($url);
+  } else {
+    $len = 0;
+  }
+
+  $len = 140 - drupal_strlen($text) + $len;
+
+  if ($len < 0) {
+    $text = drupal_substr($text, 0, $len);
+  }
+
+  dpm($text);
+  dpm($url);
+
+  $result = douban_set_request(
+    'http://api.douban.com/miniblog/saying',
+    array('status' => urlencode($text. $url))
+  );
+
+  dpm($result);
+
+//  if ($result->code == 200) {
+//    drupal_set_message(t('Sending succeed'));
+//  } else {
+//    drupal_set_message(t('Sending failed'), 'error');
+//    return false;
+//  }
+  return $result;
+}
+
+/**
+ * A form for send text to douban
+ */
+function douban_send_miniblog_form(&$form_state, $uid) {
+  $form['douban_miniblog_text'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Send to douban miniblog'),
+    '#description' => t('Max 140 words'),
+    '#required' => 1
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Submit')
+  );
+//  drupal_add_js(drupal_get_path('module', 'douban') .'/douban.js');
+  return $form;
+}
+
+function douban_send_miniblog_form_validate($form, &$form_state) {
+  $form_state['values']['douban_miniblog_text'] = trim($form_state['values']['douban_miniblog_text']);
+  if (drupal_strlen($form_state['values']['text']) > 140) {
+    form_set_error('douban_miniblog_text', t('Less 140 words'));
+  } else if (!douban_set_miniblog($form_state['values']['douban_miniblog_text'])) {
+    form_set_error('douban_miniblog_text', 'retry');
   }
 }

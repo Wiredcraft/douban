@@ -1,4 +1,4 @@
-douban module is an Drupal integration to douban.com's API
+Douban module is an Drupal integration to douban.com's API
 
 # Workflow
 
